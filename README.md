@@ -134,40 +134,61 @@ patterns is still implemented, so adding an engine later touches one file.
 
 ## Performance
 
-macOS arm64, median of 5 cold-process runs. Both indexes cover the same file
-set, and match counts were verified equal before timing.
+macOS arm64 (M-series), median of 5 cold-process runs — 3 for `grep`, which is
+slow enough that more would not change the answer. Match counts were verified
+equal across all four tools before timing. `grep` is BSD grep, the one macOS
+ships.
 
-**158,639 files** (`loop` indexed with `--hidden --no-ignore`):
+### 158,639 files, 3.7 GB (`loop` indexed with `--hidden --no-ignore`)
 
-| pattern | matches | ripgrep | tgrep (Rust) | tgrep-go |
-|---|---:|---:|---:|---:|
-| `handleRequestPayload` | 0 | 2653ms | 73ms | **50ms** |
-| `AbortSignal` | 9,146 | 2642ms | 402ms | **163ms** |
-| `^import type` | many | 2598ms | 4543ms | **1140ms** |
+| pattern | matches | grep | ripgrep | tgrep (Rust) | tgrep-go |
+|---|---:|---:|---:|---:|---:|
+| `handleRequestPayload` | 0 | 30436ms | 2623ms | 74ms | **54ms** |
+| `func [A-Z][a-z]+Handler` | 0 | 33139ms | 2661ms | 172ms | **146ms** |
+| `AbortSignal` | 9,146 | 29662ms | 2648ms | 376ms | **168ms** |
+| `^import type` | 72,477 | 26798ms | 3288ms | 5821ms | **1317ms** |
 
-**1,836 files** (the same repository with its `.gitignore` respected):
+### 1,836 files (the same repository, `.gitignore` respected)
 
-| pattern | ripgrep | tgrep (Rust) | tgrep-go |
-|---|---:|---:|---:|
-| `handleRequest` | 61ms | 26ms | 24ms |
-| `error` | 48ms | 47ms | 35ms |
-| `^import` | 44ms | 78ms | 44ms |
+All four search the identical file list here — `grep` is fed the index's own
+paths rather than pointed at a directory, or it would descend into vendored
+trees the others exclude and the comparison would be meaningless.
 
-Index build: Rust 13.3s / Go 52s at 158k files; Rust 0.6s / Go 0.9s at 1,836.
-Building is where the Rust is decisively faster.
+| pattern | matches | grep | ripgrep | tgrep (Rust) | tgrep-go |
+|---|---:|---:|---:|---:|---:|
+| `handleRequest` | 17 | 30ms | 39ms | 27ms | **22ms** |
+| `AbortSignal` | 93 | 25ms | 40ms | 31ms | **23ms** |
+| `^import type` | 854 | 27ms | 42ms | 51ms | **32ms** |
 
-What the two tables show together is that the index earns its keep on scale and
-on selectivity, not unconditionally. At 158k files a rare pattern is **53x**
-faster than ripgrep; at 1,836 files the same idea is worth almost nothing, and
-on a high-match pattern the reference implementation is *slower* than ripgrep in
-both tables — a search returning thousands of matches spends more delivering
-them than the index saves finding them, which the upstream README says too.
+Index build: Rust **13.3s** / Go 55.5s at 158k files; Rust **0.2s** / Go 0.4s at
+1,836. Building is where the Rust is decisively faster, and that is the trade —
+you pay it once per tree and get it back on every query after.
 
-One caveat on reading any tgrep benchmark: passing a walk-affecting flag
+### What this actually says
+
+**At scale, on a selective pattern, the index is transformative.** A rare
+identifier over 158,639 files: 54ms against ripgrep's 2.6 seconds and grep's 30.
+That is 49x and 563x, and it is the case tgrep exists for.
+
+**At 1,836 files it buys nothing.** Everything lands in 22–51ms because process
+startup dominates. Plain grep is as fast as any of it. Do not index a small
+repository.
+
+**A high-match pattern erodes the win, and can reverse it.** `^import type`
+returns 72,477 matches, and the reference implementation (5821ms) is *slower
+than ripgrep* (3288ms) — delivering that many results costs more than the index
+saves finding them. The upstream README says the same thing; it shows up here
+too, in both corpora.
+
+**This port is faster on search in all seven rows**, by 1.2x to 4.4x, and
+slower to build by ~4x. Nothing subtle is going on: Go's `regexp` is RE2 and
+matching dominates a search, while the Rust's parallel indexer dominates a
+build.
+
+One caveat about benchmarking tgrep at all: passing a walk-affecting flag
 (`--hidden`, `--no-ignore`) to a *search* makes both implementations redo the
-walk rather than trust the index, which took the reference from 73ms to 24
-seconds on the table above. Build the index with those flags; search without
-them.
+walk instead of trusting the index — 74ms became 24 seconds when I first got
+this wrong. Build the index with those flags; search without them.
 
 ## License
 
