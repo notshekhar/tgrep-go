@@ -134,7 +134,18 @@ patterns is still implemented, so adding an engine later touches one file.
 
 ## Performance
 
-Measured on `loop` (1,836 files, macOS arm64), median of 5 cold-process runs:
+macOS arm64, median of 5 cold-process runs. Both indexes cover the same file
+set, and match counts were verified equal before timing.
+
+**158,639 files** (`loop` indexed with `--hidden --no-ignore`):
+
+| pattern | matches | ripgrep | tgrep (Rust) | tgrep-go |
+|---|---:|---:|---:|---:|
+| `handleRequestPayload` | 0 | 2653ms | 73ms | **50ms** |
+| `AbortSignal` | 9,146 | 2642ms | 402ms | **163ms** |
+| `^import type` | many | 2598ms | 4543ms | **1140ms** |
+
+**1,836 files** (the same repository with its `.gitignore` respected):
 
 | pattern | ripgrep | tgrep (Rust) | tgrep-go |
 |---|---:|---:|---:|
@@ -142,14 +153,21 @@ Measured on `loop` (1,836 files, macOS arm64), median of 5 cold-process runs:
 | `error` | 48ms | 47ms | 35ms |
 | `^import` | 44ms | 78ms | 44ms |
 
-Index build over the same tree: Rust 0.6s, Go 0.9s.
+Index build: Rust 13.3s / Go 52s at 158k files; Rust 0.6s / Go 0.9s at 1,836.
+Building is where the Rust is decisively faster.
 
-Read these numbers carefully. 1,836 files is small — the reference's own
-benchmarks use repositories of 100k–500k files, where the index has far more to
-save. On a tree this size a common pattern returning thousands of matches spends
-more time delivering them than the index saves finding them, which is why
-`^import` is a tie and why the reference itself loses to ripgrep there. The
-index earns its keep on rare patterns and large trees.
+What the two tables show together is that the index earns its keep on scale and
+on selectivity, not unconditionally. At 158k files a rare pattern is **53x**
+faster than ripgrep; at 1,836 files the same idea is worth almost nothing, and
+on a high-match pattern the reference implementation is *slower* than ripgrep in
+both tables — a search returning thousands of matches spends more delivering
+them than the index saves finding them, which the upstream README says too.
+
+One caveat on reading any tgrep benchmark: passing a walk-affecting flag
+(`--hidden`, `--no-ignore`) to a *search* makes both implementations redo the
+walk rather than trust the index, which took the reference from 73ms to 24
+seconds on the table above. Build the index with those flags; search without
+them.
 
 ## License
 

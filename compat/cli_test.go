@@ -234,3 +234,59 @@ func TestSearchWithoutAnIndexStillWorks(t *testing.T) {
 		t.Errorf("unindexed search differs from indexed:\n  unindexed: %v\n  indexed:   %v", lines, indexed)
 	}
 }
+
+// TestWalkFlagsAtSearchTimeAreHonoured covers the last of the silent-miss
+// defects this project turned up.
+//
+// An index knows only the file set it was built from. Searching it with
+// `--hidden` when it was built without hidden files cannot find them — and the
+// original code did exactly that, returning fewer results and saying nothing.
+// The fix is to redo the walk when a corpus-changing flag is given, which is
+// what the reference does too; it is slower, and that is the honest cost of
+// asking for a different corpus.
+func TestWalkFlagsAtSearchTimeAreHonoured(t *testing.T) {
+	ours := ourBinary(t)
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"shown.txt":          "visible token here\n",
+		".config/secret.txt": "hidden token here\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An index built WITHOUT hidden files.
+	idx := t.TempDir()
+	if _, code := runCLI(t, ours, "index", root, "--index-path", idx); code != 0 {
+		t.Fatalf("index failed with code %d", code)
+	}
+
+	// The plain search sees only the indexed file.
+	plain, _ := runCLI(t, ours, "token", root, "--index-path", idx)
+	if len(plain) != 1 {
+		t.Errorf("plain search returned %d rows, want 1: %v", len(plain), plain)
+	}
+
+	// With --hidden it must find the hidden one too, index or no index.
+	hidden, _ := runCLI(t, ours, "token", root, "--hidden", "--index-path", idx)
+	var sawHidden, sawShown bool
+	for _, line := range hidden {
+		if strings.Contains(line, "secret.txt") {
+			sawHidden = true
+		}
+		if strings.Contains(line, "shown.txt") {
+			sawShown = true
+		}
+	}
+	if !sawHidden {
+		t.Errorf("--hidden did not reach the hidden file; got %v", hidden)
+	}
+	if !sawShown {
+		t.Errorf("--hidden lost the visible file; got %v", hidden)
+	}
+}

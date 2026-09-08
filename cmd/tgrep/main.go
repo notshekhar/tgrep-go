@@ -451,6 +451,17 @@ func cmdSearch(args []string) int {
 		return listFiles(root, display, f)
 	}
 
+	// A flag that changes WHICH FILES are searched cannot be honoured by an
+	// index that was built without it: the index knows only the file set it
+	// was given. Searching it anyway would silently return fewer results —
+	// `--hidden` over an index built without hidden files would find none of
+	// them and say nothing. So the walk is redone with the flags in force,
+	// which is what the reference implementation does too. It is slow, and
+	// that is the honest cost of asking for a different corpus.
+	if f.common.hidden || f.common.noIgnore || f.common.noRequireGit || f.common.text {
+		return searchWithoutIndex(root, display, patterns, f)
+	}
+
 	idx, err := reader.Open(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: no index at %s — scanning every file (slow on large trees)\n", dir)
