@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/notshekhar/tgrep-go/index"
+	"github.com/notshekhar/tgrep-go/matching"
 	"github.com/notshekhar/tgrep-go/ondisk"
 	"github.com/notshekhar/tgrep-go/query"
 	"github.com/notshekhar/tgrep-go/reader"
+	"github.com/notshekhar/tgrep-go/search"
 )
 
 // corpus is a built index together with the file contents it was built from,
@@ -357,4 +359,64 @@ func TestRelaxationIsSound(t *testing.T) {
 			assertSound(t, c, relaxed, false)
 		})
 	}
+}
+
+// TestCandidatesIsTheNarrowingHalf covers the API a host program embeds: give
+// it a pattern, get back the files worth opening, do your own matching.
+//
+// The contract has two halves and both matter. When it narrows, the result
+// must be a SUPERSET of the true matches — a missing candidate is a file
+// nobody opens and a result nobody sees. When it cannot narrow it must say so
+// rather than return an empty list, or a caller treating empty as "no matches"
+// silently returns nothing for a pattern like ".*".
+func TestCandidatesIsTheNarrowingHalf(t *testing.T) {
+	c := buildCorpus(t, map[string]string{
+		"a.go":  "package main\n\nfunc handler() {}\n",
+		"b.go":  "func handler2() {}\n",
+		"c.txt": "nothing relevant here\n",
+		"d.rs":  "fn handler3() {}\n",
+	})
+
+	t.Run("narrows to a superset of the truth", func(t *testing.T) {
+		got, exhaustive, err := search.Candidates(c.r, []string{"handler"}, matching.Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exhaustive {
+			t.Fatal("a plain literal should be narrowable")
+		}
+		for _, want := range c.truth(t, "handler", false) {
+			if !slices.Contains(got, want) {
+				t.Errorf("%s really matches but was not a candidate; got %v", want, got)
+			}
+		}
+		if slices.Contains(got, "c.txt") {
+			t.Errorf("the index failed to narrow at all: %v", got)
+		}
+	})
+
+	t.Run("says so when it cannot narrow", func(t *testing.T) {
+		for _, pattern := range []string{".*", "ab", "^"} {
+			got, exhaustive, err := search.Candidates(c.r, []string{pattern}, matching.Config{})
+			if err != nil {
+				t.Fatalf("%q: %v", pattern, err)
+			}
+			if exhaustive {
+				t.Errorf("%q reported narrowing with %v, but it constrains nothing", pattern, got)
+			}
+			if len(got) != 0 {
+				t.Errorf("%q returned %v alongside exhaustive=false; a caller must not mistake that for a candidate set", pattern, got)
+			}
+		}
+	})
+
+	t.Run("results are sorted", func(t *testing.T) {
+		got, _, err := search.Candidates(c.r, []string{"func"}, matching.Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.IsSorted(got) {
+			t.Errorf("candidates are not sorted: %v", got)
+		}
+	})
 }
