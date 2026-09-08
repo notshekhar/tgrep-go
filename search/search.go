@@ -21,6 +21,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/notshekhar/tgrep-go/encoding"
 	"github.com/notshekhar/tgrep-go/matching"
 	"github.com/notshekhar/tgrep-go/ondisk"
 	"github.com/notshekhar/tgrep-go/query"
@@ -257,7 +258,7 @@ func (s *Searcher) searchFile(path string, matcher *matching.Matcher, opts Optio
 		return FileResult{}, false
 	}
 
-	content, err := os.ReadFile(abs)
+	raw, err := os.ReadFile(abs)
 	if err != nil {
 		// A file the index knows about but that has since been deleted is an
 		// ordinary stale-index condition, not a failure worth reporting.
@@ -266,6 +267,12 @@ func (s *Searcher) searchFile(path string, matcher *matching.Matcher, opts Optio
 		}
 		return FileResult{Path: path, Err: err}, true
 	}
+
+	// Search the same text the index was built from, not the bytes on disk.
+	// A UTF-16 file's raw bytes carry NULs between every character, so a
+	// pattern would never match and the binary check below would discard it —
+	// even though the index holds its transcoded contents and nominated it.
+	content, _ := encoding.Decode(raw, encoding.Auto)
 	if !opts.SearchBinary && trigram.IsBinary(content) {
 		return FileResult{}, false
 	}

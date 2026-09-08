@@ -18,6 +18,8 @@
 package walker
 
 import (
+	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -25,6 +27,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/notshekhar/tgrep-go/encoding"
 	"github.com/notshekhar/tgrep-go/filetypes"
 	"github.com/notshekhar/tgrep-go/gitignore"
 	"github.com/notshekhar/tgrep-go/trigram"
@@ -282,6 +285,11 @@ func Walk(root string, opts Options) (*Result, error) {
 }
 
 // sniffBinary reports whether a file's first 8KB contain a NUL byte.
+//
+// A UTF-16 file is exempt. Its ASCII text is interleaved with NULs, so the
+// plain test calls it binary and the file becomes unsearchable — silently,
+// which is the whole reason this exception exists. Its byte-order mark says
+// what it is, and package encoding transcodes it before anything reads it.
 func sniffBinary(abs string) (bool, error) {
 	f, err := os.Open(abs)
 	if err != nil {
@@ -293,10 +301,13 @@ func sniffBinary(abs string) (bool, error) {
 	n, err := f.Read(buf)
 	if err != nil && n == 0 {
 		// A genuinely empty file reads zero bytes at EOF and is text.
-		if err.Error() == "EOF" {
+		if errors.Is(err, io.EOF) {
 			return false, nil
 		}
 		return false, err
+	}
+	if encoding.IsUTF16(buf[:n]) {
+		return false, nil
 	}
 	return trigram.IsBinary(buf[:n]), nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/notshekhar/tgrep-go/encoding"
 	"github.com/notshekhar/tgrep-go/filetypes"
 	"github.com/notshekhar/tgrep-go/gitignore"
 	"github.com/notshekhar/tgrep-go/trigram"
@@ -372,10 +373,13 @@ func (w *Watcher) apply(abs string) applied {
 		return appliedNothing
 	}
 
-	content, err := os.ReadFile(abs)
+	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return appliedNothing
 	}
+	// Decoded exactly as the builder decodes it, or an edited UTF-16 file
+	// would enter the overlay as binary and stop matching.
+	content, _ := encoding.Decode(raw, encoding.Auto)
 	if !w.opts.SearchBinary && trigram.IsBinary(content) {
 		return appliedNothing
 	}

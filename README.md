@@ -35,6 +35,7 @@ second walker to disagree with the host program's own.
 | `index` | streaming writer and the external merge sorter |
 | `query` | regex → trigram plan, plan execution, PCRE relaxation |
 | `walker` | repository walk with the gitignore engine |
+| `encoding` | BOM transcoding and lossy UTF-8 repair |
 | `gitignore` | gitignore(5) pattern matching |
 | `matching` | line indexing, the matcher, context windows |
 | `search` | candidate resolution and parallel file search |
@@ -59,6 +60,8 @@ its own assumptions.
   corpora and on whole repositories — 8,317 matches for one pattern on `loop`.
 - **Planner soundness.** 400 generated patterns assert that every file which
   really matches survives into the candidate set.
+- **At scale.** Indexing 158,639 files produces a `lookup.bin` byte-identical
+  to the reference's — 688,076 trigrams, same bytes.
 
 Run the standalone harness against any repository:
 
@@ -80,6 +83,13 @@ hand-written case had reached. Searching `context|Context` over
 ripgrep and the reference both report two. It surfaced in TypeScript's own
 compiler output, in the identifier
 `shouldEnterSuppressNewDiagnosticsContextContext`.
+
+Scale finds what fixtures cannot. Indexing 159,000 files exposed a divergence
+in the trigram tables that six whole-repository comparisons had missed: this
+port was reading raw bytes where the reference decodes first. A UTF-16 file is
+NUL-interleaved, so it was being classified as binary and skipped — silently
+unfindable, with no way to tell the result from "not present". Fixing it
+brought the two tables to byte-identical at that scale.
 
 A repository that vendors minified or generated code needs care: one 174KB
 source-map line repeated per match makes `return --vimgrep` produce **5.3 GB**
@@ -107,6 +117,14 @@ places, and in both it hides a file the user expects to be searchable:
 This port follows git and ripgrep. `compat/walker_test.go` records both, asserts
 this port's behaviour, and logs the reference's, so a future upstream fix simply
 turns them into two more parity cases.
+
+**Encoding follows ripgrep.** A UTF-8 or UTF-16 byte-order mark is sniffed and
+the file transcoded; otherwise bytes are read as UTF-8 with invalid sequences
+repaired to U+FFFD. No other detection is attempted — guessing an encoding from
+content is unreliable, and ripgrep deliberately does not. Repair substitutes one
+replacement per *maximal subpart*, which is the Unicode recommendation and not
+the same as one per byte; `compat/encoding_test.go` pins the granularity against
+counts measured from the reference.
 
 **No backreferences or lookaround.** Go's `regexp` is RE2: linear time, but it
 cannot express them, and there is no `fancy_regex` equivalent in the standard

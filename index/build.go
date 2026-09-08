@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/notshekhar/tgrep-go/encoding"
 	"github.com/notshekhar/tgrep-go/meta"
 	"github.com/notshekhar/tgrep-go/pathindex"
 	"github.com/notshekhar/tgrep-go/trigram"
@@ -172,16 +173,24 @@ func BuildFromPaths(indexDir, root string, paths []string, opts Options) (*Outco
 				if opts.Progress != nil {
 					opts.Progress(path)
 				}
+				// Decode before classifying. A UTF-16 file is full of NULs
+				// and would be called binary on its raw bytes, so the check
+				// has to see the text a search will see, not the bytes on
+				// disk.
+				decoded, _ := encoding.Decode(content, encoding.Auto)
 				// The binary check is what keeps a 200 MB executable from
 				// contributing a few million meaningless trigrams — and, more
 				// to the point, from being searched later.
-				if trigram.IsBinary(content) {
+				if trigram.IsBinary(decoded) {
 					out.why = "binary"
 					results <- out
 					continue
 				}
-				out.masks = trigram.ExtractMergedMasks(content)
-				out.content = meta.ContentIDOf(content)
+				out.masks = trigram.ExtractMergedMasks(decoded)
+				// The identity is of the DECODED bytes, which is what produced
+				// the postings — hashing the raw file would make a re-encoded
+				// but textually identical file look changed.
+				out.content = meta.ContentIDOf(decoded)
 				results <- out
 			}
 		}()
