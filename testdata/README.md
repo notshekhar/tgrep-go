@@ -23,6 +23,12 @@ Regenerate both after changing the fixture:
 ../tgrep/target/release/tgrep index testdata/fixture --index-path testdata/refindex
 ```
 
+`refindex/meta.json` records an absolute `root_path` from the machine that
+generated it. Nothing compares that value — the round-trip test loads it and
+writes it back, so any path works — and it is left as the reference wrote it
+rather than doctored, since the point of this directory is to hold the
+reference's real output.
+
 Two of the six files are **not** byte-comparable and the tests only check them
 semantically:
 
