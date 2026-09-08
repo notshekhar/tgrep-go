@@ -1,0 +1,6 @@
+# Build output
+/tgrep
+/tgrep-diff
+
+# The reference index, rebuilt by testdata/README.md's command.
+# The fixture itself IS committed: the differential tests compare against it.

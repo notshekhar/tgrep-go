@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "num_files": 5,
+  "num_trigrams": 156,
+  "created_at": 1788825190,
+  "updated_at": 1788825190,
+  "root_path": "/Users/shekhar/Documents/notshekhar/tgrep-go/testdata/fixture",
+  "complete": true
+}
