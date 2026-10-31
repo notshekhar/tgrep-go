@@ -14,8 +14,11 @@ package query
 
 import (
 	"fmt"
+	"regexp"
 	"regexp/syntax"
 	"slices"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/notshekhar/tgrep-go/trigram"
 )
@@ -97,23 +100,40 @@ func triBytes(h uint32) string {
 }
 
 // Build parses a regular expression and returns its plan.
+//
+// caseInsensitive is applied as the parser's starting flag rather than to the
+// literals afterwards, so an inline (?-i) inside the pattern still switches it
+// off for its own scope, exactly as it does in the matcher.
 func Build(pattern string, caseInsensitive bool) (Plan, error) {
-	re, err := syntax.Parse(pattern, syntax.Perl)
+	flags := syntax.Perl
+	if caseInsensitive {
+		flags |= syntax.FoldCase
+	}
+	re, err := syntax.Parse(pattern, flags)
 	if err != nil {
 		return MatchAll(), fmt.Errorf("regex parse error: %w", err)
 	}
 	// Simplify rewrites counted repetitions into forms the walk below can read
 	// uniformly; it never changes the language, so it cannot affect soundness.
-	return simplify(decompose(re.Simplify(), caseInsensitive)), nil
+	return simplify(decompose(re.Simplify())), nil
 }
 
-// BuildLiteral returns the plan for a fixed string, with no regex parsing.
+// BuildLiteral returns the plan for a fixed string.
+//
+// A case-insensitive literal goes through the regex planner, because folding
+// is not ASCII-only: `shellshock` matches `ſhellſhocK`, and only the parsed
+// form knows which letters have such variants. A literal that somehow fails
+// to plan scans everything rather than being rejected — that only gives up
+// narrowing, and the matcher still verifies every line.
 func BuildLiteral(literal string, caseInsensitive bool) Plan {
-	text := literal
 	if caseInsensitive {
-		text = asciiLower(literal)
+		plan, err := Build(regexp.QuoteMeta(literal), true)
+		if err != nil {
+			return MatchAll()
+		}
+		return plan
 	}
-	return simplify(literalPlan([]byte(text)))
+	return simplify(literalPlan([]byte(literal)))
 }
 
 // BuildMulti returns one plan covering every pattern the user supplied.
@@ -183,74 +203,161 @@ func literalPlan(bytes []byte) Plan {
 // exists on disk.
 func asciiLower(s string) string {
 	out := []byte(s)
-	for i, b := range out {
-		if b >= 'A' && b <= 'Z' {
-			out[i] = b + 32
-		}
-	}
+	asciiLowerInPlace(out)
 	return string(out)
 }
 
-// literalBytes returns the UTF-8 bytes of a literal node, lowercased when the
-// query or the node itself is case-insensitive.
-func literalBytes(re *syntax.Regexp, caseInsensitive bool) []byte {
-	text := string(re.Rune)
-	// FoldCase is how an inline (?i) reaches a literal. Treating it the same
-	// as the caller's flag keeps `(?i)foo` and `-i foo` on one path.
-	if caseInsensitive || re.Flags&syntax.FoldCase != 0 {
-		text = asciiLower(text)
+func asciiLowerInPlace(b []byte) {
+	for i, c := range b {
+		b[i] = lowerByte(c)
 	}
-	return []byte(text)
+}
+
+func lowerByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}
+
+// asciiFold returns the one byte every case variant of r lowercases to, when
+// all of them are ASCII.
+//
+// That is the only folding the index can answer for, because it stores ASCII-
+// lowercased trigrams and nothing else. `s` fails it — ſ (U+017F) is one of
+// its variants — as do `k` (Kelvin sign) and every non-ASCII letter, and each
+// of those must break the literal run instead of being looked up.
+func asciiFold(r rune) (byte, bool) {
+	var folded byte
+	for f := r; ; {
+		if f > unicode.MaxASCII {
+			return 0, false
+		}
+		b := lowerByte(byte(f))
+		if f != r && b != folded {
+			return 0, false
+		}
+		folded = b
+		if f = unicode.SimpleFold(f); f == r {
+			return folded, true
+		}
+	}
+}
+
+// asciiClassByte collapses a character class whose members are all ASCII and
+// all lowercase to one byte, such as [Hh]. Anything wider breaks the run.
+func asciiClassByte(re *syntax.Regexp) (byte, bool) {
+	if re.Op != syntax.OpCharClass || len(re.Rune) == 0 {
+		return 0, false
+	}
+	var folded byte
+	for i := 0; i < len(re.Rune); i += 2 {
+		lo, hi := re.Rune[i], re.Rune[i+1]
+		if lo != hi || lo > unicode.MaxASCII {
+			return 0, false
+		}
+		b := lowerByte(byte(lo))
+		if i > 0 && b != folded {
+			return 0, false
+		}
+		folded = b
+	}
+	return folded, true
+}
+
+// literalRun accumulates the bytes of adjacent literal nodes, so trigrams
+// spanning the seam between two of them are found, and turns each completed
+// run into required trigrams.
+type literalRun struct {
+	bytes []byte
+	// folded is whether any byte in the run stands for a case-insensitive
+	// letter. The whole run is then looked up lowercased — including its
+	// case-sensitive neighbours, since a file holding "ABC" has the trigram
+	// "abc" in the index but not "Abc".
+	folded  bool
+	queries []TrigramQuery
+}
+
+func (r *literalRun) addLiteral(re *syntax.Regexp) {
+	fold := re.Flags&syntax.FoldCase != 0
+	for _, c := range re.Rune {
+		switch {
+		case !fold || unicode.SimpleFold(c) == c:
+			// Under FoldCase the parser stores a letter as its smallest
+			// variant (é as É), so only a rune with no variants at all may be
+			// taken literally.
+			r.bytes = utf8.AppendRune(r.bytes, c)
+		default:
+			if b, ok := asciiFold(c); ok {
+				r.addFolded(b)
+			} else {
+				r.flush()
+			}
+		}
+	}
+}
+
+func (r *literalRun) addFolded(b byte) {
+	r.bytes = append(r.bytes, b)
+	r.folded = true
+}
+
+func (r *literalRun) flush() {
+	if r.folded {
+		asciiLowerInPlace(r.bytes)
+	}
+	if plan := literalPlan(r.bytes); plan.Kind == KindAnd {
+		r.queries = append(r.queries, plan.Queries...)
+	}
+	r.bytes, r.folded = r.bytes[:0], false
+}
+
+func (r *literalRun) plan() Plan {
+	r.flush()
+	if len(r.queries) == 0 {
+		return MatchAll()
+	}
+	return Plan{Kind: KindAnd, Queries: r.queries}
 }
 
 // decompose walks the parsed regex and builds a plan.
-func decompose(re *syntax.Regexp, caseInsensitive bool) Plan {
+func decompose(re *syntax.Regexp) Plan {
 	switch re.Op {
 	case syntax.OpLiteral:
-		return literalPlan(literalBytes(re, caseInsensitive))
+		var run literalRun
+		run.addLiteral(re)
+		return run.plan()
 
 	case syntax.OpConcat:
-		// Literal children are joined before extraction so that trigrams
-		// spanning the seam between two adjacent literals are found. A
-		// non-literal child breaks the run: nothing can be assumed about the
+		// A non-literal child breaks the run: nothing can be assumed about the
 		// bytes across it.
-		var all []TrigramQuery
-		var run []byte
-		flush := func() {
-			if len(run) == 0 {
-				return
-			}
-			if plan := literalPlan(run); plan.Kind == KindAnd {
-				all = append(all, plan.Queries...)
-			}
-			run = run[:0]
-		}
+		var run literalRun
 		for _, sub := range re.Sub {
 			if sub.Op == syntax.OpLiteral {
-				run = append(run, literalBytes(sub, caseInsensitive)...)
+				run.addLiteral(sub)
 				continue
 			}
-			flush()
+			if b, ok := asciiClassByte(sub); ok {
+				run.addFolded(b)
+				continue
+			}
+			run.flush()
 			// A child that yields its own ANDed trigrams contributes them,
 			// since everything in a concatenation must be present. A MatchAll
 			// or Or child contributes nothing: it constrains no single
 			// trigram, and folding an Or into the surrounding And would
 			// require every branch's trigrams at once, which would drop real
 			// matches.
-			if plan := decompose(sub, caseInsensitive); plan.Kind == KindAnd {
-				all = append(all, plan.Queries...)
+			if plan := decompose(sub); plan.Kind == KindAnd {
+				run.queries = append(run.queries, plan.Queries...)
 			}
 		}
-		flush()
-		if len(all) == 0 {
-			return MatchAll()
-		}
-		return Plan{Kind: KindAnd, Queries: all}
+		return run.plan()
 
 	case syntax.OpAlternate:
 		branches := make([]Plan, 0, len(re.Sub))
 		for _, sub := range re.Sub {
-			plan := decompose(sub, caseInsensitive)
+			plan := decompose(sub)
 			// One unindexable branch makes the whole alternation unindexable:
 			// a file matching only that branch would be missing from any
 			// candidate set built from the others.
@@ -266,11 +373,11 @@ func decompose(re *syntax.Regexp, caseInsensitive bool) Plan {
 
 	case syntax.OpPlus:
 		// One or more: the body must appear at least once.
-		return decompose(re.Sub[0], caseInsensitive)
+		return decompose(re.Sub[0])
 
 	case syntax.OpRepeat:
 		if re.Min >= 1 {
-			return decompose(re.Sub[0], caseInsensitive)
+			return decompose(re.Sub[0])
 		}
 		// Zero occurrences satisfy it, so it requires nothing.
 		return MatchAll()
@@ -280,7 +387,7 @@ func decompose(re *syntax.Regexp, caseInsensitive bool) Plan {
 		return MatchAll()
 
 	case syntax.OpCapture:
-		return decompose(re.Sub[0], caseInsensitive)
+		return decompose(re.Sub[0])
 
 	default:
 		// Character classes, any-char, anchors, word boundaries, empty match

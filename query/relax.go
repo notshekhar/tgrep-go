@@ -8,7 +8,12 @@ package query
 // Every rewrite only ever widens the matched language, so L(pattern) is a
 // subset of L(relaxed):
 //
-//   - deleting a zero-width lookaround removes a constraint on the match;
+//   - replacing a zero-width lookaround with the empty group (?:) removes a
+//     constraint on the match. The placeholder keeps the neighbouring tokens
+//     apart: deleting the group outright could fuse them into new syntax, as
+//     in a{(?=2)2} becoming the repetition a{2}, or hand a quantifier that
+//     applied to the lookaround to the atom before it, as in a(?=x){2}
+//     becoming a{2}. Either would narrow the language;
 //   - turning an atomic group (?>…) into (?:…) only restores backtracking
 //     paths.
 //
@@ -88,6 +93,7 @@ func Relax(pattern string) (relaxed string, ok bool) {
 					return "", false
 				}
 				i = end
+				out = append(out, []rune("(?:)")...)
 			case groupAtomic:
 				out = append(out, '(', '?', ':')
 				i += 3

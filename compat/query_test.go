@@ -330,8 +330,13 @@ func TestRelaxationIsSound(t *testing.T) {
 		relaxes bool
 		want    string // what it must relax to, when it relaxes
 	}{
-		{`password(?=\=)`, true, `password`},
-		{`(?<=password)=`, true, `=`},
+		{`password(?=\=)`, true, `password(?:)`},
+		{`(?<=password)=`, true, `(?:)=`},
+		// Deleting the lookaround outright fused its neighbours into the
+		// repetitions `abc{2}`, which demand "abcc" and lost the original's
+		// matches; the empty group keeps them apart.
+		{`abc{(?=2)2}`, true, `abc{(?:)2}`},
+		{`abc(?=x){2}`, true, `abc(?:){2}`},
 		{`(?>password)=`, true, `(?:password)=`},
 		{`password\1`, false, ""},
 		{`(?(1)password|user)`, false, ""},
