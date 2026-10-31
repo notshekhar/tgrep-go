@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/notshekhar/tgrep-go/index"
+	"github.com/notshekhar/tgrep-go/meta"
 	"github.com/notshekhar/tgrep-go/ondisk"
 	"github.com/notshekhar/tgrep-go/reader"
 )
@@ -35,10 +36,14 @@ func buildLikeReference(t *testing.T, opts index.Options) (dir string, paths []s
 // TestBuiltIndexIsByteIdenticalToTheReference is the point of the whole
 // byte-compatible format decision. Every deterministic file the builder writes
 // must match the Rust implementation's output exactly.
+//
+// files-extra.bin is the exception since the reference began indexing hidden
+// files: it now writes the sidecar's v2 form, carrying hidden-file visibility
+// this port does not record. TestExtraPathsSidecarReads compares it by content.
 func TestBuiltIndexIsByteIdenticalToTheReference(t *testing.T) {
 	dir, _ := buildLikeReference(t, index.Options{Complete: true})
 
-	for _, name := range []string{"lookup.bin", "index.bin", "files.bin", "files-extra.bin"} {
+	for _, name := range []string{"lookup.bin", "index.bin", "files.bin"} {
 		ours, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Errorf("read our %s: %v", name, err)
@@ -49,6 +54,26 @@ func TestBuiltIndexIsByteIdenticalToTheReference(t *testing.T) {
 			t.Errorf("%s differs from the reference (%d bytes vs %d)\n%s",
 				name, len(ours), len(want), firstDifference(ours, want))
 		}
+	}
+}
+
+// TestBuiltMetaBindsItsFileTable checks the builder records the same
+// file_table_id the reference would, for the table it actually wrote.
+func TestBuiltMetaBindsItsFileTable(t *testing.T) {
+	dir, _ := buildLikeReference(t, index.Options{Complete: true})
+	m, err := meta.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := meta.Load(refIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != ref.Version || m.FileTableID == nil || ref.FileTableID == nil || *m.FileTableID != *ref.FileTableID {
+		t.Errorf("version %d id %v, reference version %d id %v", m.Version, m.FileTableID, ref.Version, ref.FileTableID)
+	}
+	if m.HiddenComplete {
+		t.Error("hidden_complete must stay false: this port never indexes hidden files")
 	}
 }
 

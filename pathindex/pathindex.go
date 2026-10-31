@@ -11,20 +11,30 @@ package pathindex
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+
+	"github.com/notshekhar/tgrep-go/ondisk"
 )
 
 // Filename is the sidecar's name inside the index directory.
 const Filename = "files-extra.bin"
 
 const (
-	magic       = "TGRPXP01"
-	headerLen   = len(magic) + 8 // magic + u64 count
-	pathLenSize = 4              // u32 length prefix per path
+	magic = "TGRPXP01"
+	// visibilityMagic marks a sidecar that carries, between the count and the
+	// paths, a u64-prefixed JSON record of which paths are hidden. The
+	// reference writes it for hidden-inclusive indexes. This port never builds
+	// those, so it only ever reads this form, and skips the record: without
+	// hidden paths in the index there is nothing for it to filter.
+	visibilityMagic = "TGRPXP02"
+	headerLen       = len(magic) + 8 // magic + u64 count
+	pathLenSize     = 4              // u32 length prefix per path
+	trailerLenSize  = 8              // u64 length of the visibility record
 )
 
 // ErrCorrupted marks a malformed sidecar.
@@ -91,7 +101,14 @@ func Read(indexDir string) (paths []string, found bool, err error) {
 	if len(data) < headerLen {
 		return nil, false, corruptedf("header is truncated (%d bytes, expected at least %d)", len(data), headerLen)
 	}
-	if string(data[:len(magic)]) != magic {
+	pos := headerLen
+	switch string(data[:len(magic)]) {
+	case magic:
+	case visibilityMagic:
+		if pos, err = skipVisibility(data, pos); err != nil {
+			return nil, false, err
+		}
+	default:
 		return nil, false, corruptedf("invalid header")
 	}
 
@@ -100,13 +117,12 @@ func Read(indexDir string) (paths []string, found bool, err error) {
 	// hold before sizing anything from it: each record costs at least its
 	// 4-byte length prefix, so a corrupt count near u64 max is caught here
 	// rather than in an allocation.
-	maxRecords := uint64((len(data) - headerLen) / pathLenSize)
+	maxRecords := uint64((len(data) - pos) / pathLenSize)
 	if count > maxRecords {
 		return nil, false, corruptedf("declares %d paths but the file can contain at most %d", count, maxRecords)
 	}
 
 	paths = make([]string, 0, count)
-	pos := headerLen
 	for i := uint64(0); i < count; i++ {
 		if pos+pathLenSize > len(data) {
 			return nil, false, corruptedf("path %d has a truncated length", i)
@@ -116,8 +132,35 @@ func Read(indexDir string) (paths []string, found bool, err error) {
 		if n < 0 || pos+n > len(data) {
 			return nil, false, corruptedf("path %d declares %d bytes but only %d remain", i, n, len(data)-pos)
 		}
-		paths = append(paths, string(data[pos:pos+n]))
+		path := string(data[pos : pos+n])
+		// The same rule as files.bin: every listed path is joined to the root
+		// later, so a tampered one must not reach outside it.
+		if err := ondisk.ValidatePath(path); err != nil {
+			return nil, false, corruptedf("path %d: %v: %q", i, err, path)
+		}
+		paths = append(paths, path)
 		pos += n
 	}
+	if pos != len(data) {
+		return nil, false, corruptedf("%d trailing bytes after the declared path set", len(data)-pos)
+	}
 	return paths, true, nil
+}
+
+// skipVisibility steps over a v2 sidecar's visibility record, checking only
+// that it is in bounds and well-formed JSON.
+func skipVisibility(data []byte, pos int) (int, error) {
+	if pos+trailerLenSize > len(data) {
+		return 0, corruptedf("visibility length is truncated")
+	}
+	n := binary.LittleEndian.Uint64(data[pos : pos+trailerLenSize])
+	pos += trailerLenSize
+	if n > uint64(len(data)-pos) {
+		return 0, corruptedf("visibility exceeds the file bounds")
+	}
+	end := pos + int(n)
+	if !json.Valid(data[pos:end]) {
+		return 0, corruptedf("visibility is not valid JSON")
+	}
+	return end, nil
 }

@@ -53,6 +53,10 @@ type Options struct {
 	// PathPrefix is prepended to every path, so output can name files the way
 	// the user asked for them rather than relative to the index root.
 	PathPrefix string
+	// NoFilename leaves the path off match, context and count lines, as
+	// ripgrep does when the search was given a single file: the user already
+	// knows which file every line came from.
+	NoFilename bool
 	// WithContext tells the formatter that context lines may appear, which is
 	// what turns on the '--' block separators.
 	WithContext bool
@@ -104,14 +108,12 @@ func (w *Writer) WriteFile(fr search.FileResult) error {
 		return nil
 	case FormatCount:
 		if fr.MatchedLines > 0 {
-			_, err := fmt.Fprintf(w.w, "%s:%d\n", w.path(fr.Path), fr.MatchedLines)
-			return err
+			return w.writeCount(fr.Path, fr.MatchedLines)
 		}
 		return nil
 	case FormatCountMatches:
 		if fr.Matches > 0 {
-			_, err := fmt.Fprintf(w.w, "%s:%d\n", w.path(fr.Path), fr.Matches)
-			return err
+			return w.writeCount(fr.Path, fr.Matches)
 		}
 		return nil
 	case FormatVimgrep:
@@ -121,6 +123,15 @@ func (w *Writer) WriteFile(fr search.FileResult) error {
 	default:
 		return w.writeDefault(fr)
 	}
+}
+
+func (w *Writer) writeCount(p string, n int) error {
+	if w.opts.NoFilename {
+		_, err := fmt.Fprintf(w.w, "%d\n", n)
+		return err
+	}
+	_, err := fmt.Fprintf(w.w, "%s:%d\n", w.path(p), n)
+	return err
 }
 
 func (w *Writer) writePathLine(p string) error {
@@ -141,7 +152,7 @@ func (w *Writer) writeDefault(fr search.FileResult) error {
 		return nil
 	}
 
-	if w.opts.Heading {
+	if w.opts.Heading && !w.opts.NoFilename {
 		if w.wroteBlock {
 			if _, err := w.w.WriteString("\n"); err != nil {
 				return err
@@ -172,7 +183,7 @@ func (w *Writer) writeDefault(fr search.FileResult) error {
 		if line.Kind == matching.KindContext {
 			sep = "-"
 		}
-		if !w.opts.Heading {
+		if !w.opts.Heading && !w.opts.NoFilename {
 			if _, err := w.w.WriteString(w.path(fr.Path) + sep); err != nil {
 				return err
 			}

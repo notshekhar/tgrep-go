@@ -10,6 +10,7 @@ import (
 
 	"github.com/notshekhar/tgrep-go/encoding"
 	"github.com/notshekhar/tgrep-go/meta"
+	"github.com/notshekhar/tgrep-go/ondisk"
 	"github.com/notshekhar/tgrep-go/pathindex"
 	"github.com/notshekhar/tgrep-go/trigram"
 )
@@ -91,6 +92,10 @@ type Outcome struct {
 	SkippedBinary []string
 	SkippedLarge  []string
 	Unreadable    []string
+	// Unstorable are paths an index cannot hold safely — see
+	// ondisk.ValidatePath. They stay out of the index entirely, so a caller
+	// that treats unknown paths as candidates still searches them.
+	Unstorable []string
 	// Evidence records what each indexed file looked like when it was read.
 	Evidence *meta.Evidence
 }
@@ -149,6 +154,11 @@ func BuildFromPaths(indexDir, root string, paths []string, opts Options) (*Outco
 			for slot := range jobs {
 				path := paths[slot]
 				out := extracted{slot: slot, path: path}
+				if ondisk.ValidatePath(path) != nil {
+					out.why = "unstorable"
+					results <- out
+					continue
+				}
 				abs := filepath.Join(root, filepath.FromSlash(path))
 
 				info, err := os.Stat(abs)
@@ -231,6 +241,8 @@ func BuildFromPaths(indexDir, root string, paths []string, opts Options) (*Outco
 				outcome.SkippedLarge = append(outcome.SkippedLarge, e.path)
 			case "unreadable":
 				outcome.Unreadable = append(outcome.Unreadable, e.path)
+			case "unstorable":
+				outcome.Unstorable = append(outcome.Unstorable, e.path)
 			default:
 				// The id is this file's position among the files that carry
 				// postings — assigned here, in drain order, so it matches the

@@ -13,14 +13,17 @@ import (
 	"time"
 
 	"lukechampine.com/blake3"
+
+	"github.com/notshekhar/tgrep-go/ondisk"
 )
 
 const (
 	MetaFilename       = "meta.json"
 	FilestampsFilename = "filestamps.json"
 
-	// Version is the format version this package writes.
-	Version = 2
+	// Version is the format version this package writes. It moves with the
+	// file table's, since that is the part of the format that changed.
+	Version = ondisk.FileTableVersion
 )
 
 // contentIDDomain separates this hash from every other use of blake3.
@@ -45,7 +48,49 @@ type IndexMeta struct {
 	// indexing, so the index covers only part of the repo. Absent in older
 	// indexes, where it defaults to true — see UnmarshalJSON.
 	Complete bool `json:"complete"`
+	// HiddenComplete claims that every eligible hidden file is indexed. This
+	// port never indexes hidden files, so it always writes false, which tells
+	// the reference to scan rather than trust the index for a --hidden search.
+	HiddenComplete bool `json:"hidden_complete"`
+	// Visibility lists hidden entries in a hidden-inclusive index. Always
+	// empty here, for the same reason.
+	Visibility Visibility `json:"visibility"`
+	// FileTableID binds this metadata to the exact files.bin it was written
+	// with, so a reader can tell a torn multi-file publication from a whole
+	// one. It is the blake3 hash of the file, and absent in older indexes.
+	FileTableID *FileTableID `json:"file_table_id"`
 }
+
+// Visibility mirrors the reference's PathVisibility.
+type Visibility struct {
+	Hidden map[string]bool `json:"hidden"`
+}
+
+// Hides reports whether a stored path is hidden: it, or a directory above it,
+// is a recorded hidden entry. This is the reference's PathVisibility rule, and
+// it is what a search without --hidden must apply to an index that holds
+// hidden files — otherwise they leak into its results.
+func (v Visibility) Hides(path string) bool {
+	if len(v.Hidden) == 0 {
+		return false
+	}
+	for i := range len(path) {
+		if path[i] == '/' {
+			if _, ok := v.Hidden[path[:i]]; ok {
+				return true
+			}
+		}
+	}
+	_, ok := v.Hidden[path]
+	return ok
+}
+
+// FileTableID is the blake3 hash of a files.bin. A fixed-size array encodes as
+// a JSON array of numbers, which is how the reference writes it.
+type FileTableID [32]byte
+
+// FileTableIDOf hashes a files.bin's bytes.
+func FileTableIDOf(filesBin []byte) FileTableID { return blake3.Sum256(filesBin) }
 
 // New builds metadata stamped with the current time.
 func New(rootPath string, numFiles, numTrigrams uint64) IndexMeta {
@@ -58,10 +103,12 @@ func New(rootPath string, numFiles, numTrigrams uint64) IndexMeta {
 		UpdatedAt:   now,
 		RootPath:    rootPath,
 		Complete:    true,
+		Visibility:  Visibility{Hidden: map[string]bool{}},
 	}
 }
 
-// UnmarshalJSON decodes metadata, defaulting Complete to true.
+// UnmarshalJSON decodes metadata, defaulting Complete to true and Visibility
+// to empty.
 //
 // The zero value of a Go bool is false, so a straight unmarshal of an index
 // written before `complete` existed would report every one of them as partial.
@@ -70,6 +117,11 @@ func (m *IndexMeta) UnmarshalJSON(data []byte) error {
 	decoded := raw{Complete: true}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
+	}
+	// An index from before visibility existed has none, which is the same as
+	// having no hidden paths — and is written back as such, like the reference.
+	if decoded.Visibility.Hidden == nil {
+		decoded.Visibility.Hidden = map[string]bool{}
 	}
 	*m = IndexMeta(decoded)
 	return nil

@@ -29,6 +29,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/notshekhar/tgrep-go/meta"
+	"github.com/notshekhar/tgrep-go/ondisk"
 )
 
 // defaultPatterns exercise the planner's distinct paths: plain literals, an
@@ -77,7 +80,13 @@ func main() {
 	d := &differ{root: root, reference: reference, ours: ours, verbose: *verbose}
 	d.run(patterns)
 
-	fmt.Printf("\n%d checks, %d disagreements\n", d.checks, len(d.failures))
+	fmt.Printf("\n%d checks, %d disagreements, %d skipped\n", d.checks, len(d.failures), len(d.skipped))
+	if len(d.skipped) > 0 {
+		fmt.Println("\nSKIPPED (not compared)")
+		for _, s := range d.skipped {
+			fmt.Printf("  - %s\n", s)
+		}
+	}
 	if len(d.failures) > 0 {
 		fmt.Println("\nDISAGREEMENTS")
 		for _, f := range d.failures {
@@ -85,7 +94,7 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Println("everything agreed")
+	fmt.Println("everything compared agreed")
 }
 
 func fatal(format string, args ...any) {
@@ -140,6 +149,7 @@ type differ struct {
 
 	checks    int
 	failures  []string
+	skipped   []string
 	lastCheck time.Time
 }
 
@@ -149,6 +159,15 @@ type differ struct {
 // indistinguishable from a hung one — a full comparison over a checkout with a
 // vendored node_modules runs dozens of whole-corpus searches and takes
 // minutes — so progress is not optional even though only failures matter.
+// skip records a comparison that could not be made, visibly: a harness that
+// quietly passes what it did not compare is worse than one that fails.
+func (d *differ) skip(name, reason string) {
+	d.checks++
+	d.skipped = append(d.skipped, name+": "+reason)
+	fmt.Printf("  %-44s %7s  %s\n", truncate(name, 44), elapsed(d.lastCheck), "SKIPPED")
+	d.lastCheck = time.Now()
+}
+
 func (d *differ) check(name string, ok bool, detail string) {
 	d.checks++
 	status := "ok"
@@ -255,6 +274,10 @@ func (d *differ) compareFileSets() {
 // so its own two runs would not match either. lookup.bin is order-independent
 // and is the meaningful comparison.
 func (d *differ) compareIndexes(refIdx, ourIdx string) {
+	if hidden := hiddenEntries(refIdx); len(hidden.Hidden) > 0 {
+		d.compareVisibleTables(refIdx, ourIdx, hidden)
+		return
+	}
 	refLookup, err1 := os.ReadFile(filepath.Join(refIdx, "lookup.bin"))
 	ourLookup, err2 := os.ReadFile(filepath.Join(ourIdx, "lookup.bin"))
 	if err1 != nil || err2 != nil {
@@ -279,6 +302,64 @@ func (d *differ) compareIndexes(refIdx, ourIdx string) {
 	refFiles := len(normalisePaths(d.root, refList))
 	ourFiles := len(normalisePaths(d.root, ourList))
 	d.check("indexed file counts", refFiles == ourFiles, fmt.Sprintf("reference %d, port %d", refFiles, ourFiles))
+}
+
+// hiddenEntries reads the hidden paths a hidden-inclusive reference index
+// recorded. Empty for an index without them.
+func hiddenEntries(indexDir string) meta.Visibility {
+	m, err := meta.Load(indexDir)
+	if err != nil {
+		return meta.Visibility{}
+	}
+	return m.Visibility
+}
+
+// compareVisibleTables is compareIndexes for a reference that also indexed
+// hidden files, which this port does not.
+//
+// Their trigrams are mixed into the reference's lookup.bin with no way to take
+// them out again, so the byte comparison is skipped — and said to be skipped,
+// rather than passed. What can still be compared exactly is the file table:
+// the reference's paths, less every one under a hidden entry, must be ours.
+func (d *differ) compareVisibleTables(refIdx, ourIdx string, hidden meta.Visibility) {
+	d.skip("lookup.bin identical", fmt.Sprintf("the reference also indexed %d hidden entries", len(hidden.Hidden)))
+
+	refPaths, err1 := indexedPaths(refIdx)
+	ourPaths, err2 := indexedPaths(ourIdx)
+	if err1 != nil || err2 != nil {
+		d.check("files.bin readable", false, fmt.Sprintf("reference: %v, port: %v", err1, err2))
+		return
+	}
+	visible := slices.DeleteFunc(refPaths, hidden.Hides)
+	missing, extra := setDiff(ourPaths, visible)
+	detail := fmt.Sprintf("reference %d visible of %d, port %d", len(visible), len(refPaths), len(ourPaths))
+	if len(missing) > 0 {
+		detail += fmt.Sprintf("\nonly in reference (%d): %v", len(missing), sample(missing))
+	}
+	if len(extra) > 0 {
+		detail += fmt.Sprintf("\nonly in port (%d): %v", len(extra), sample(extra))
+	}
+	d.check("indexed non-hidden paths", len(missing) == 0 && len(extra) == 0, detail)
+}
+
+func indexedPaths(indexDir string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(indexDir, "files.bin"))
+	if err != nil {
+		return nil, err
+	}
+	body, err := ondisk.FileTableBody(data)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := ondisk.DecodeFileEntries(body)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+	return paths, nil
 }
 
 func (d *differ) compareSearch(pattern, refIdx, ourIdx string) {
@@ -315,8 +396,8 @@ func (d *differ) compareSearchWithFlags(pattern string, flags []string, refIdx, 
 		// Past the cap the two sides no longer cover the same rows, so a
 		// difference would be an artefact of where each was cut. Say so and
 		// compare nothing rather than report a false disagreement.
-		d.check(strings.TrimSpace(name), true,
-			fmt.Sprintf("SKIPPED: output exceeds %d rows (minified or generated content); not comparable", maxRows))
+		d.skip(strings.TrimSpace(name),
+			fmt.Sprintf("output exceeds %d rows (minified or generated content); not comparable", maxRows))
 		return
 	}
 	if len(missing) > 0 {

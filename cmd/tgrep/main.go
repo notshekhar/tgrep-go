@@ -52,6 +52,10 @@ func run(args []string) int {
 	// A subcommand is only a subcommand in first position; `tgrep index` means
 	// build an index, but `tgrep foo index` searches for "foo" under ./index.
 	switch args[0] {
+	case "search":
+		// The reference's explicit form of the default command. Without it,
+		// `tgrep search -c foo dir` searched for the word "search".
+		return cmdSearch(args[1:])
 	case "index":
 		return cmdIndex(args[1:])
 	case "serve":
@@ -445,6 +449,9 @@ func cmdSearch(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
+	if info, err := os.Stat(root); err == nil && !info.IsDir() && !f.filesOnly {
+		return searchOneFile(root, display, patterns, f)
+	}
 	dir := f.common.indexDir(root)
 
 	if f.filesOnly {
@@ -474,7 +481,14 @@ func cmdSearch(args []string) int {
 		f.before, f.after = f.context, f.context
 	}
 
-	res, err := search.New(root, idx).Run(searchOptions(patterns, f))
+	opts := searchOptions(patterns, f)
+	// An index built by the reference may hold hidden files, recorded in its
+	// visibility. --hidden never reaches here (it rewalks above), so they are
+	// always filtered out of an indexed search.
+	if m, err := meta.Load(dir); err == nil && len(m.Visibility.Hidden) > 0 {
+		opts.PathFilter = func(p string) bool { return !m.Visibility.Hides(p) }
+	}
+	res, err := search.New(root, idx).Run(opts)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -514,13 +528,26 @@ func searchWithoutIndex(root, display string, patterns []string, f searchFlags) 
 	if err != nil {
 		return fail("walk: %v", err)
 	}
+	return scanPaths(root, walked.Files, display, patterns, f, false)
+}
+
+// searchOneFile searches a file named on the command line. It is searched
+// from its directory — searching from the file itself would look for
+// <file>/<file> and find nothing — and, like ripgrep, without an index and
+// without repeating its name on every line.
+func searchOneFile(file, display string, patterns []string, f searchFlags) int {
+	return scanPaths(filepath.Dir(file), []string{filepath.Base(file)}, filepath.Dir(display), patterns, f, true)
+}
+
+// scanPaths searches exactly these paths under root through a throwaway index.
+func scanPaths(root string, paths []string, display string, patterns []string, f searchFlags, single bool) int {
 	dir, err := os.MkdirTemp("", "tgrep-scan-")
 	if err != nil {
 		return fail("%v", err)
 	}
 	defer os.RemoveAll(dir)
 
-	if _, err := index.BuildFromPaths(dir, root, walked.Files, index.Options{Complete: true}); err != nil {
+	if _, err := index.BuildFromPaths(dir, root, paths, index.Options{Complete: true}); err != nil {
 		return fail("build: %v", err)
 	}
 	idx, err := reader.Open(dir)
@@ -536,7 +563,7 @@ func searchWithoutIndex(root, display string, patterns []string, f searchFlags) 
 	if err != nil {
 		return fail("%v", err)
 	}
-	return emit(res, display, f)
+	return emitResult(res, display, f, single)
 }
 
 func listFiles(root, display string, f searchFlags) int {
@@ -557,7 +584,12 @@ func listFiles(root, display string, f searchFlags) int {
 }
 
 func emit(res *search.Result, display string, f searchFlags) int {
+	return emitResult(res, display, f, false)
+}
+
+func emitResult(res *search.Result, display string, f searchFlags, single bool) int {
 	opts := output.Options{
+		NoFilename:  single,
 		Format:      output.FormatDefault,
 		LineNumbers: f.lineNumbers,
 		WithContext: f.before > 0 || f.after > 0,

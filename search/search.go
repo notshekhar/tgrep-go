@@ -14,6 +14,7 @@
 package search
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -25,7 +26,6 @@ import (
 	"github.com/notshekhar/tgrep-go/matching"
 	"github.com/notshekhar/tgrep-go/ondisk"
 	"github.com/notshekhar/tgrep-go/query"
-	"github.com/notshekhar/tgrep-go/trigram"
 )
 
 // Options control a search.
@@ -191,13 +191,11 @@ func (s *Searcher) Run(opts Options) (*Result, error) {
 // the caller may want to say out loud, since it is the difference between a
 // search that took milliseconds and one that took seconds.
 func (s *Searcher) candidates(opts Options) (paths []string, scannedEverything bool, err error) {
-	// SmartCase is deliberately not passed here, and that is safe rather than
-	// an oversight. Smart case only turns insensitivity ON when no pattern
-	// contains an uppercase letter — and for such a pattern the planner's
-	// lowercasing is a no-op, so the plan it builds is identical either way.
-	// When a pattern does contain uppercase, smart case leaves the search
-	// sensitive, which is exactly what passing false asks for.
-	plan, err := query.BuildMulti(opts.Patterns, opts.Matcher.FixedString, opts.Matcher.CaseInsensitive)
+	// Smart case decides folding for the planner as well as the matcher. A
+	// lowercase pattern under smart case folds through Unicode (shellshock
+	// matches ſhellſhocK), so planning it case-sensitively would lose files.
+	foldsCase := opts.Matcher.FoldsCase(opts.Patterns)
+	plan, err := query.BuildMulti(opts.Patterns, opts.Matcher.FixedString, foldsCase)
 	if err != nil {
 		return nil, false, err
 	}
@@ -213,11 +211,12 @@ func (s *Searcher) candidates(opts Options) (paths []string, scannedEverything b
 	lookup := func(hash uint32) []ondisk.PostingEntry { return s.index.LookupTrigramWithMasks(hash) }
 	ids := query.Execute(plan, lookup)
 
-	// A single-literal pattern additionally supports the adjacency test, which
-	// the plan cannot carry because its queries are sorted by hash rather than
-	// by position.
-	if len(opts.Patterns) == 1 && opts.Matcher.FixedString {
-		ids = query.AdjacencyFilter(ids, []byte(literalFor(opts)), lookup)
+	// A single case-sensitive literal additionally supports the adjacency
+	// test, which the plan cannot carry because its queries are sorted by hash
+	// rather than by position. Folding rules it out: a folded literal may match
+	// through variants such as ſ for s, which have no adjacent trigrams to test.
+	if len(opts.Patterns) == 1 && opts.Matcher.FixedString && !foldsCase {
+		ids = query.AdjacencyFilter(ids, []byte(opts.Patterns[0]), lookup)
 	}
 
 	paths = make([]string, 0, len(ids))
@@ -227,22 +226,6 @@ func (s *Searcher) candidates(opts Options) (paths []string, scannedEverything b
 		}
 	}
 	return paths, false, nil
-}
-
-// literalFor returns the single fixed-string pattern, lowercased when the
-// search folds case, so it lines up with what the index recorded.
-func literalFor(opts Options) string {
-	p := opts.Patterns[0]
-	if !opts.Matcher.CaseInsensitive {
-		return p
-	}
-	out := []byte(p)
-	for i, b := range out {
-		if b >= 'A' && b <= 'Z' {
-			out[i] = b + 32
-		}
-	}
-	return string(out)
 }
 
 // searchFile reads and matches one file. ok is false when the file produced
@@ -273,7 +256,11 @@ func (s *Searcher) searchFile(path string, matcher *matching.Matcher, opts Optio
 	// pattern would never match and the binary check below would discard it —
 	// even though the index holds its transcoded contents and nominated it.
 	content, _ := encoding.Decode(raw, encoding.Auto)
-	if !opts.SearchBinary && trigram.IsBinary(content) {
+	// A NUL anywhere makes the file binary for searching, as in ripgrep, not
+	// just one in the first 8KB that the index's cheaper check looks at — a
+	// source file with a stray NUL at byte 12,000 is indexed but must still
+	// be left out of a search that reached it by traversal.
+	if !opts.SearchBinary && bytes.IndexByte(content, 0) >= 0 {
 		return FileResult{}, false
 	}
 

@@ -2,6 +2,8 @@
 
 A Go port of [microsoft/tgrep](https://github.com/microsoft/tgrep) — trigram-indexed
 grep with a client/server architecture for fast regex search in large codebases.
+It tracks upstream **v1.2.6** (index format version 3); the shared-daemon and
+managed-worktree system upstream added in 1.1–1.2 is not ported.
 
 The index format is **byte-compatible** with the Rust implementation's, so either
 tool can read the other's index, and the two can be diffed against each other
@@ -51,7 +53,8 @@ implementation and drive its binary, rather than only checking this port against
 its own assumptions.
 
 - **Index bytes.** A Go-built index is byte-identical to a Rust-built one over
-  the same file list: `lookup.bin`, `index.bin`, `files.bin`, `files-extra.bin`.
+  the same file list: `lookup.bin`, `index.bin` and the v3 `files.bin`, and
+  `meta.json` carries the same blake3 `file_table_id`.
 - **Postings rebuilt from source.** Every trigram in the reference index is
   re-derived from the fixture files and compared, file ids and both masks
   included.
@@ -73,8 +76,11 @@ It builds both indexes, compares admitted paths, compares `lookup.bin` byte for
 byte, and runs a pattern corpus through both binaries. Exit status is non-zero
 on any disagreement.
 
-Six repositories currently pass all 25 checks — `tgrep`, `odin`, `oboe.chat`,
-`drover`, `loop` (1,836 paths) and `arc` (3,495 paths, `node_modules` included).
+Against v1.2.6 the reference also indexes hidden files, which mixes their
+trigrams into its `lookup.bin`. The harness then reports that comparison as
+**SKIPPED** — never as passed — and instead checks that the reference's file
+table, less every path its visibility records as hidden, is exactly this
+port's. `tgrep-go`, `drover`, `loop` and `arc` agree on every search check.
 
 The harness earns its keep: it found a defect on a real checkout that no
 hand-written case had reached. Searching `context|Context` over
@@ -98,6 +104,13 @@ and caps it at 200,000 rows, reporting the comparison as skipped rather than
 truncating it silently.
 
 ## Deliberate differences
+
+**Hidden files are not indexed.** Since v1.1 the reference indexes hidden files
+too and filters them at query time through a visibility record. This port
+indexes only what a default walk admits, writes `hidden_complete: false` (which
+makes the reference scan rather than trust the index for `--hidden`), and
+`--hidden` here rewalks the tree. It does read the reference's v3 indexes, and
+applies their visibility so hidden files never leak into a plain search.
 
 **Walk order is deterministic.** The reference's parallel walker is not: five
 runs over one unchanged 320-file tree produced three different file orders, and

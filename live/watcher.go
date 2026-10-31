@@ -261,6 +261,13 @@ func (w *Watcher) loop() {
 
 // note records a path and (re)arms the debounce timer.
 func (w *Watcher) note(event fsnotify.Event) {
+	// An attribute-only change — Spotlight, a backup tool, `touch -a`, an
+	// xattr — leaves the bytes alone, so there is nothing to reindex. Queuing
+	// it anyway re-arms the debounce on every such event, and a tool that
+	// keeps touching attributes would keep the index flushing forever.
+	if event.Op == fsnotify.Chmod {
+		return
+	}
 	// A newly created directory has to be watched immediately, and its
 	// contents swept: files can be written into it before the Add lands.
 	if event.Has(fsnotify.Create) {

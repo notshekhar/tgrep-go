@@ -30,7 +30,7 @@ import (
 // Paths come back sorted, so a caller feeding them to a parallel searcher
 // still gets a deterministic order to reassemble into.
 func Candidates(index Index, patterns []string, cfg matching.Config) (paths []string, exhaustive bool, err error) {
-	plan, err := query.BuildMulti(patterns, cfg.FixedString, cfg.CaseInsensitive)
+	plan, err := query.BuildMulti(patterns, cfg.FixedString, cfg.FoldsCase(patterns))
 	if err != nil {
 		return nil, false, err
 	}

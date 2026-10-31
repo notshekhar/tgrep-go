@@ -9,6 +9,7 @@ package index
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 
@@ -145,19 +146,29 @@ func (w *writer) flushLookup() error {
 	return nil
 }
 
-// close flushes both files and returns how many trigram groups were written.
+// close flushes both files to stable storage and returns how many trigram
+// groups were written.
+//
+// Synced, not just flushed: the index is published by renaming its directory
+// into place, and a rename can reach the disk before the data it names. A
+// crash in that window would leave a complete-looking index of zeroes.
 func (w *writer) close() (int, error) {
 	if err := w.flushLookup(); err != nil {
 		w.abort()
 		return 0, err
 	}
-	if err := w.postings.Flush(); err != nil {
-		w.abort()
-		return 0, err
-	}
-	if err := w.lookup.Flush(); err != nil {
-		w.abort()
-		return 0, err
+	for _, f := range []struct {
+		buf  *bufio.Writer
+		file *os.File
+	}{{w.postings, w.postingsFile}, {w.lookup, w.lookupFile}} {
+		if err := f.buf.Flush(); err != nil {
+			w.abort()
+			return 0, err
+		}
+		if err := f.file.Sync(); err != nil {
+			w.abort()
+			return 0, err
+		}
 	}
 	if err := w.postingsFile.Close(); err != nil {
 		w.lookupFile.Close()
@@ -209,22 +220,11 @@ func writeSorted(indexDir string, postings []TrigramPosting) (int, error) {
 // contract every posting already encodes, so the caller must pass exactly the
 // order it indexed in.
 func WriteFilesAndMeta(indexDir, root string, paths []string, trigramCount int, complete bool) error {
-	f, err := os.Create(filepath.Join(indexDir, "files.bin"))
+	table, err := encodeFileTable(paths)
 	if err != nil {
 		return err
 	}
-	w := bufio.NewWriterSize(f, 64<<10)
-	for id, path := range paths {
-		if err := ondisk.WriteFileEntry(w, uint32(id), path); err != nil {
-			f.Close()
-			return err
-		}
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
+	if err := writeSynced(filepath.Join(indexDir, "files.bin"), table); err != nil {
 		return err
 	}
 
@@ -240,5 +240,38 @@ func WriteFilesAndMeta(indexDir, root string, paths []string, trigramCount int, 
 
 	m := meta.New(canonRoot, uint64(len(paths)), uint64(trigramCount))
 	m.Complete = complete
+	id := meta.FileTableIDOf(table)
+	m.FileTableID = &id
 	return m.Save(indexDir)
+}
+
+// encodeFileTable renders files.bin in memory. The meta needs its hash, and a
+// table is a few bytes per path, so holding it beats reading it back.
+func encodeFileTable(paths []string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := ondisk.WriteFileTableHeader(&buf); err != nil {
+		return nil, err
+	}
+	for id, path := range paths {
+		if err := ondisk.WriteFileEntry(&buf, uint32(id), path); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func writeSynced(path string, data []byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

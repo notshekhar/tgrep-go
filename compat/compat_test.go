@@ -11,6 +11,7 @@
 package compat
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -49,7 +50,11 @@ func readRef(t *testing.T, name string) []byte {
 // filesTable decodes files.bin into the id→path table the postings index into.
 func filesTable(t *testing.T) []string {
 	t.Helper()
-	entries, err := ondisk.DecodeFileEntries(readRef(t, "files.bin"))
+	body, err := ondisk.FileTableBody(readRef(t, "files.bin"))
+	if err != nil {
+		t.Fatalf("files.bin header: %v", err)
+	}
+	entries, err := ondisk.DecodeFileEntries(body)
 	if err != nil {
 		t.Fatalf("decode files.bin: %v", err)
 	}
@@ -86,22 +91,29 @@ func TestFilesBinDecodesTheReferenceTable(t *testing.T) {
 func TestFileEntryRoundTripsTheReferenceBytes(t *testing.T) {
 	skipWithoutRef(t)
 	data := readRef(t, "files.bin")
-	entries, err := ondisk.DecodeFileEntries(data)
+	body, err := ondisk.FileTableBody(data)
+	if err != nil {
+		t.Fatalf("header: %v", err)
+	}
+	entries, err := ondisk.DecodeFileEntries(body)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// Re-encoding every record must reproduce the reference file exactly —
-	// this is the writer half of the format, checked without a builder.
-	var rebuilt []byte
+	// Re-encoding the header and every record must reproduce the reference
+	// file exactly — the writer half of the format, checked without a builder.
+	var rebuilt bytes.Buffer
+	if err := ondisk.WriteFileTableHeader(&rebuilt); err != nil {
+		t.Fatal(err)
+	}
 	for _, e := range entries {
 		encoded, err := ondisk.EncodeFileEntry(e.FileID, e.Path)
 		if err != nil {
 			t.Fatalf("encode %q: %v", e.Path, err)
 		}
-		rebuilt = append(rebuilt, encoded...)
+		rebuilt.Write(encoded)
 	}
-	if string(rebuilt) != string(data) {
+	if rebuilt.String() != string(data) {
 		t.Errorf("re-encoded files.bin differs from the reference:\n got %x\nwant %x", rebuilt, data)
 	}
 }
@@ -229,8 +241,13 @@ func TestMetaMatchesTheReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
-	if m.Version != 2 {
-		t.Errorf("version = %d, want 2", m.Version)
+	if m.Version != meta.Version {
+		t.Errorf("version = %d, want %d", m.Version, meta.Version)
+	}
+	// The reference binds meta.json to files.bin by its blake3 hash; ours is
+	// computed the same way, so the same table must give the same id.
+	if want := meta.FileTableIDOf(readRef(t, "files.bin")); m.FileTableID == nil || *m.FileTableID != want {
+		t.Errorf("file_table_id = %v, want the blake3 of files.bin %v", m.FileTableID, want)
 	}
 	if m.NumFiles != 5 {
 		t.Errorf("num_files = %d, want 5", m.NumFiles)
@@ -298,17 +315,16 @@ func TestExtraPathsSidecarReads(t *testing.T) {
 		t.Errorf("got %d extra paths %v, want none", len(paths), paths)
 	}
 
-	// Writing it back must reproduce the reference bytes.
+	// The reference wrote the v2 form, with hidden-file visibility this port
+	// does not record, so ours is the v1 form — the one the reference still
+	// writes for an index without visibility. It must read back the same.
 	dir := t.TempDir()
 	if err := pathindex.Write(dir, paths); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	ours, err := os.ReadFile(filepath.Join(dir, pathindex.Filename))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(ours) != string(readRef(t, pathindex.Filename)) {
-		t.Errorf("our sidecar differs:\n got %x\nwant %x", ours, readRef(t, pathindex.Filename))
+	again, found, err := pathindex.Read(dir)
+	if err != nil || !found || len(again) != len(paths) {
+		t.Errorf("our sidecar read back as %v (found %v, err %v), want %v", again, found, err, paths)
 	}
 }
 

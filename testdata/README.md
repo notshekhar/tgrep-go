@@ -29,13 +29,19 @@ writes it back, so any path works — and it is left as the reference wrote it
 rather than doctored, since the point of this directory is to hold the
 reference's real output.
 
-Two of the six files are **not** byte-comparable and the tests only check them
+It was regenerated with reference v1.2.6, which writes format version 3: a
+versioned `files.bin` header, and `meta.json` bound to it by a blake3
+`file_table_id`.
+
+Three of the six files are **not** byte-comparable and the tests only check them
 semantically:
 
 - `filestamps.json` serialises a hash map, whose iteration order the Rust
   implementation randomises per process.
 - `meta.json` carries `created_at`/`updated_at` and an absolute `root_path`,
   so it only round-trips against itself, not across machines.
+- `files-extra.bin` is the v2 sidecar, carrying hidden-file visibility this
+  port does not record; its paths are compared instead.
 
-The other four — `lookup.bin`, `index.bin`, `files.bin`, `files-extra.bin` —
-are fully deterministic and are compared byte for byte.
+The other three — `lookup.bin`, `index.bin`, `files.bin` — are fully
+deterministic and are compared byte for byte.

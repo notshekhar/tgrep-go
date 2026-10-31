@@ -470,3 +470,87 @@ func TestSmartCaseMatchesTheReference(t *testing.T) {
 		})
 	}
 }
+
+// TestIndexedSearchKeepsUnicodeFoldedMatches drives the whole indexed path —
+// planner, executor and matcher — over files that match only through Unicode
+// case folding, which the index's ASCII lowercasing cannot see. Each search
+// must find every file a full scan finds.
+func TestIndexedSearchKeepsUnicodeFoldedMatches(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"ascii.txt":  "SHELLSHOCK\n",
+		"long-s.txt": "ſhellſhocK\n",
+		"lower.txt":  "café au lait\n",
+		"upper.txt":  "CAFÉ AU LAIT\n",
+		"mixed.txt":  "ABC\n",
+		"decoy.txt":  "nothing to see\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := indexed(t, root)
+
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		cfg     matching.Config
+		want    []string
+	}{
+		{"smart case", "shellshock", matching.Config{SmartCase: true}, []string{"ascii.txt", "long-s.txt"}},
+		{"-i", "shellshock", matching.Config{CaseInsensitive: true}, []string{"ascii.txt", "long-s.txt"}},
+		{"-F -i", "café", matching.Config{FixedString: true, CaseInsensitive: true}, []string{"lower.txt", "upper.txt"}},
+		{"-F smart case", "café", matching.Config{FixedString: true, SmartCase: true}, []string{"lower.txt", "upper.txt"}},
+		{"scoped flag beside a sensitive letter", "A(?i:bc)", matching.Config{}, []string{"mixed.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := s.Run(search.Options{Patterns: []string{tc.pattern}, Matcher: tc.cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, fr := range res.Files {
+				got = append(got, fr.Path)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("%q found %v, want %v (scanned everything: %v)", tc.pattern, got, tc.want, res.Stats.ScannedEverything)
+			}
+			if res.Stats.ScannedEverything {
+				t.Errorf("%q should still narrow through the index", tc.pattern)
+			}
+		})
+	}
+}
+
+// TestLateNulMakesAFileBinaryForSearch pins ripgrep's rule against the index's
+// cheaper one: the index only looks for a NUL in the first 8KB, but a search
+// that reaches a file by traversal skips it for a NUL anywhere.
+func TestLateNulMakesAFileBinaryForSearch(t *testing.T) {
+	root := t.TempDir()
+	late := "needle\n" + strings.Repeat("x", 12_000) + "\x00\n"
+	if err := os.WriteFile(filepath.Join(root, "late.ts"), []byte(late), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "text.ts"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := indexed(t, root)
+	for _, binary := range []bool{false, true} {
+		res, err := s.Run(search.Options{Patterns: []string{"needle"}, SearchBinary: binary})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, fr := range res.Files {
+			got = append(got, fr.Path)
+		}
+		want := []string{"text.ts"}
+		if binary {
+			want = []string{"late.ts", "text.ts"}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("SearchBinary=%v found %v, want %v", binary, got, want)
+		}
+	}
+}

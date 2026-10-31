@@ -290,3 +290,29 @@ func TestWalkFlagsAtSearchTimeAreHonoured(t *testing.T) {
 		t.Errorf("--hidden lost the visible file; got %v", hidden)
 	}
 }
+
+// TestSingleFileArgumentIsSearched covers a file named on the command line. It
+// used to be walked as <file>/<file> and silently match nothing; ripgrep
+// searches it and, since there is only one file, leaves its name off.
+func TestSingleFileArgumentIsSearched(t *testing.T) {
+	ours := ourBinary(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "w.txt")
+	if err := os.WriteFile(file, []byte("a- b\nfoo-bar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"-n", "foo", file}, []string{"2:foo-bar"}},
+		{[]string{"-c", "foo", file}, []string{"1"}},
+		{[]string{"-l", "foo", file}, []string{file}},
+		{[]string{"-w", "-n", "a-", file}, []string{"1:a- b"}},
+	} {
+		got, code := runCLI(t, ours, tc.args...)
+		if code != 0 || !slices.Equal(got, tc.want) {
+			t.Errorf("tgrep %v = %v (exit %d), want %v", tc.args, got, code, tc.want)
+		}
+	}
+}

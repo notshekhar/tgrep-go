@@ -27,7 +27,8 @@
 //
 // # files.bin — file ID → path
 //
-// Variable-length records: file_id(u32 LE) + path_len(u16 LE) + path bytes.
+// A versioned header (see filetable.go), then variable-length records:
+// file_id(u32 LE) + path_len(u16 LE) + path bytes.
 // IDs are dense in 0..N; the reader enforces that, because a corrupt record
 // claiming an id near u32 max would otherwise size an allocation from it.
 package ondisk
@@ -164,11 +165,13 @@ func tooLong(path string) error {
 	return corruptedf("path too long for index (%d bytes, max %d): %q…", len(path), MaxPathLen, path[:end])
 }
 
-// DecodeFileEntries reads every record of files.bin.
+// DecodeFileEntries reads every record of a files.bin body (see FileTableBody).
 //
 // A truncation is an error rather than a short read: silently accepting a
 // partial file table yields queries that return empty paths for high IDs,
-// which reads as "no match" instead of as the corruption it is.
+// which reads as "no match" instead of as the corruption it is. So is a path
+// that fails ValidatePath — a tampered table must not be able to point a
+// search outside its root.
 func DecodeFileEntries(data []byte) ([]FileEntry, error) {
 	var entries []FileEntry
 	pos := 0
@@ -183,7 +186,11 @@ func DecodeFileEntries(data []byte) ([]FileEntry, error) {
 			return nil, corruptedf("files.bin truncated: declared path_len %d exceeds remaining %d bytes",
 				pathLen, len(data)-pos)
 		}
-		entries = append(entries, FileEntry{FileID: fileID, Path: string(data[pos : pos+pathLen])})
+		path := string(data[pos : pos+pathLen])
+		if err := ValidatePath(path); err != nil {
+			return nil, corruptedf("files.bin file_id %d: %v: %q", fileID, err, path)
+		}
+		entries = append(entries, FileEntry{FileID: fileID, Path: path})
 		pos += pathLen
 	}
 	return entries, nil

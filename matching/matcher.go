@@ -29,9 +29,9 @@ type Config struct {
 	FixedString bool
 	// CaseInsensitive folds case.
 	CaseInsensitive bool
-	// SmartCase folds case only when no pattern contains an uppercase letter,
-	// which is what makes a lowercase query forgiving without making an
-	// explicitly capitalised one useless.
+	// SmartCase folds case only when no pattern contains an uppercase
+	// literal, which is what makes a lowercase query forgiving without making
+	// an explicitly capitalised one useless. See FoldsCase.
 	SmartCase bool
 	// WordBoundary requires each match to be a whole word.
 	WordBoundary bool
@@ -69,14 +69,14 @@ func Build(patterns []string, cfg Config) (*Matcher, error) {
 			// first and last branches.
 			p = `^(?:` + p + `)$`
 		case cfg.WordBoundary:
-			p = `\b(?:` + p + `)\b`
+			p = wordWrap(p)
 		}
 		parts = append(parts, `(?:`+p+`)`)
 	}
 	expr := strings.Join(parts, "|")
 
 	var flags string
-	if cfg.CaseInsensitive || (cfg.SmartCase && !anyUpper(patterns)) {
+	if cfg.FoldsCase(patterns) {
 		flags += "i"
 	}
 	if cfg.Multiline {
@@ -122,17 +122,6 @@ func rejectUnsupported(pattern string) error {
 		}
 	}
 	return nil
-}
-
-func anyUpper(patterns []string) bool {
-	for _, p := range patterns {
-		for _, r := range p {
-			if r >= 'A' && r <= 'Z' {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // Multiline reports whether matches may cross line boundaries.

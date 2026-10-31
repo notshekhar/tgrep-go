@@ -92,7 +92,12 @@ func Open(indexDir string) (*Reader, error) {
 		r.Close()
 		return nil, err
 	}
-	entries, err := ondisk.DecodeFileEntries(filesData)
+	body, err := ondisk.FileTableBody(filesData)
+	if err != nil {
+		r.Close()
+		return nil, err
+	}
+	entries, err := ondisk.DecodeFileEntries(body)
 	if err != nil {
 		r.Close()
 		return nil, err
